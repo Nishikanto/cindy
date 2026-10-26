@@ -751,6 +751,100 @@ async function withReleasedNode<T>(
   }
 }
 
+function normalizeAxName(value: string | undefined): string {
+  return (value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** Read the element's current accessibility role and name (same normalization as snapshots). */
+async function readNodeIdentity(
+  send: DebuggerTransport['sendCommand'],
+  backendDOMNodeId: number,
+): Promise<{ role: string; name: string } | undefined> {
+  const response = (await send('Accessibility.getPartialAXTree', {
+    backendNodeId: backendDOMNodeId,
+    fetchRelatives: false,
+  })) as { nodes?: RawAxNode[] };
+  const node = response.nodes?.find((raw) => raw.backendDOMNodeId === backendDOMNodeId && !raw.ignored);
+  if (!node) return undefined;
+  return { role: axText(node.role).toLowerCase() || 'unknown', name: axText(node.name) };
+}
+
+/** Role must match; the name is compared only when the snapshot recorded one. */
+function matchesSnapshotIdentity(ref: SnapshotRef, current: { role: string; name: string }): boolean {
+  if (current.role !== ref.role) return false;
+  const expectedName = normalizeAxName(ref.name);
+  return expectedName === '' || normalizeAxName(current.name) === expectedName;
+}
+
+/**
+ * A node can stay attached while a re-render turns it into a different
+ * control, so existence alone does not prove the ref still means what the
+ * agent saw. Refuse instead of typing into the wrong field.
+ */
+async function assertFieldMatchesSnapshot(
+  send: DebuggerTransport['sendCommand'],
+  ref: string,
+  snapshotRef: SnapshotRef,
+): Promise<void> {
+  const current = await readNodeIdentity(send, snapshotRef.backendDOMNodeId);
+  if (!current || !matchesSnapshotIdentity(snapshotRef, current)) {
+    throw new Error(
+      `field ${ref} changed since the snapshot (expected ${snapshotRef.role} "${snapshotRef.name ?? ''}"); take a new snapshot`,
+    );
+  }
+}
+
+/**
+ * Check that a fill target can take the value without the model typing a
+ * secret: passwords and one-time codes go through request_input_handoff.
+ */
+async function assertFillableField(
+  send: DebuggerTransport['sendCommand'],
+  ref: string,
+  target: ResolvedNode,
+  declaredType: string | undefined,
+): Promise<void> {
+  const probe = await callOnNode<{ secret?: boolean; reason?: string } | undefined>(
+    send,
+    target.objectId,
+    `function(declaredType) {
+      /* cindy:fill-probe */
+      const kind = String(declaredType || (
+        this instanceof HTMLInputElement ? this.type : ""
+      )).toLowerCase();
+      const tokens = this instanceof HTMLInputElement
+        ? String(this.autocomplete || "").toLowerCase().split(/\\s+/)
+        : [];
+      const secret = this instanceof HTMLInputElement && (
+        this.type === "password"
+        || tokens.includes("one-time-code")
+        || tokens.includes("current-password")
+        || tokens.includes("new-password")
+      );
+      if (kind === "checkbox" || kind === "radio" || this instanceof HTMLSelectElement) {
+        return { secret };
+      }
+      if ("readOnly" in this && this.readOnly) return { secret, reason: "target is read-only" };
+      const textInput = this instanceof HTMLInputElement
+        && [
+          "date", "datetime-local", "email", "month", "number", "password",
+          "search", "tel", "text", "time", "url", "week",
+        ].includes(this.type);
+      const editable = textInput
+        || this instanceof HTMLTextAreaElement
+        || (this instanceof HTMLElement && this.isContentEditable);
+      return editable ? { secret } : { secret, reason: "target is not editable" };
+    }`,
+    [declaredType],
+  );
+  if (probe?.secret) {
+    throw new Error(
+      `field ${ref} is a password or verification-code field; do not type it — call request_input_handoff`,
+    );
+  }
+  if (probe?.reason) throw new Error(`field ${ref}: ${probe.reason}`);
+}
+
 async function fillNode(
   send: DebuggerTransport['sendCommand'],
   target: ResolvedNode,
@@ -2033,8 +2127,7 @@ export class RsbWebviewAutomation {
         }
         case 'fill': {
           if (Array.isArray(request.fields) && request.fields.length > 0) {
-            let filled = 0;
-            for (const rawField of request.fields) {
+            const fields = request.fields.map((rawField) => {
               if (!rawField || typeof rawField !== 'object') {
                 throw new Error('fill.fields entries must be objects');
               }
@@ -2042,20 +2135,52 @@ export class RsbWebviewAutomation {
               if (typeof field.ref !== 'string' || field.ref === '') {
                 throw new Error('fill.fields[].ref required');
               }
-              const fieldRef = field.ref;
+              return {
+                ref: field.ref,
+                value: field.value,
+                type: typeof field.type === 'string' ? field.type : undefined,
+              };
+            });
+            const snapshotRefOf = (ref: string): SnapshotRef => {
+              const snapshotRef = this.refsByTab.get(tabId)?.get(ref);
+              if (!snapshotRef) throw new Error(`unknown or stale snapshot ref: ${ref}; take a new snapshot`);
+              return snapshotRef;
+            };
+            // Pass 1: check every field before typing anything, so a changed,
+            // read-only or secret field never leaves the form half-filled.
+            for (const field of fields) {
+              const snapshotRef = snapshotRefOf(field.ref);
               await withReleasedNode(
                 send,
-                () => resolveTarget(fieldRef, undefined, undefined),
+                () => resolveRef(send, snapshotRef),
                 async (target) => {
+                  await assertFieldMatchesSnapshot(send, field.ref, snapshotRef);
                   await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
-                  await fillNode(
-                    send,
-                    target,
-                    field.value,
-                    typeof field.type === 'string' ? field.type : undefined,
-                  );
+                  await assertFillableField(send, field.ref, target, field.type);
                 },
               );
+            }
+            // Pass 2: fill in order, re-checking identity right before each field.
+            let filled = 0;
+            for (const field of fields) {
+              try {
+                const snapshotRef = snapshotRefOf(field.ref);
+                await withReleasedNode(
+                  send,
+                  () => resolveRef(send, snapshotRef),
+                  async (target) => {
+                    await assertFieldMatchesSnapshot(send, field.ref, snapshotRef);
+                    await waitForActionable(send, target, { timeoutMs: request.timeoutMs });
+                    await fillNode(send, target, field.value, field.type);
+                  },
+                );
+              } catch (err) {
+                if (filled === 0) throw err;
+                const message = err instanceof Error ? err.message : String(err);
+                throw new Error(
+                  `${message}; filled ${filled} of ${fields.length} fields before stopping — do not retype them`,
+                );
+              }
               filled += 1;
             }
             return { tabId, kind: request.kind, filled };
