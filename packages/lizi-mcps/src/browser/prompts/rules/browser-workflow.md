@@ -42,6 +42,7 @@
      - 下拉:`{ kind: "select", ref, values: [...] }`
      - 悬停 / 拖拽:`{ kind: "hover", ref }` / `{ kind: "drag", startRef, endRef }`
    - 需要操作后观察时，在 `act` / `open` / `navigate` / `upload` 加 `afterSnapshot:{}`，一次调用就返回动作结果和正文默认最多 4000 字符的精简快照（`maxChars` 可调，最高 20000）。已看过页面结构、只需继续表单时可用 `afterSnapshot:{selector:"已确认的区域选择器"}`，避免每次重读整页。后置快照不保证异步页面已加载完；需要的信息还未出现时，等待具体内容再补读。
+   - **同一表单的多个输入框一次填完**：用最近一次 snapshot 的 ref，`{action:"act", targetId, request:{kind:"fill", fields:[{ref,type:"text",value}, …]}, afterSnapshot:{}}`。只填字段，**不在同一次调用里提交**；看 `afterSnapshot` 确认值都对、没有报错，再单独点提交。密码、验证码、你不知道的个人信息不要放进 `fill`，调用 `request_input_handoff`。报错说 "changed since the snapshot" 就重新 snapshot；报 "filled N of M" 时前 N 个已填好，不要重填。
    - `ref` 必须取自**最近一次** snapshot（含返回的 `afterSnapshot`）。导航 / 弹窗 / 提交后页面变了，先观察再继续，别用旧 ref。`afterSnapshot.ok:false` 只表示后续读取失败；顶层 `ok:true` 表示动作已经成功，只补读页面，不重做提交或上传。没带后置快照、快照被截断或内容不足时，再按需单独 snapshot。
    - 别盲等。需要等待用 `{ kind: "wait", ... }`(等 `loadState` / `textGone` / `timeoutMs`),不要靠反复重试空转。
 
