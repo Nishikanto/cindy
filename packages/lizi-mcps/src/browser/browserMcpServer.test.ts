@@ -556,6 +556,21 @@ describe('createBrowserMcpServer', () => {
     await h.cleanup();
   });
 
+  // 测试价值：生产入口 list_tools。多字段 fill 在两种后端已先校验目标再写入；规则需要告诉
+  // agent 用它一次填完同一表单、不在同一调用里提交、密码与验证码走代输入。最小失败输入：
+  // browser-workflow 规则里没有 fill fields 指引。tier：unit。
+  it('ships the multi-field fill guidance', async () => {
+    const h = await makeHarness();
+    const result = await h.client.callTool({ name: 'list_tools', arguments: { category: 'browser' } });
+    const rules = (JSON.parse((result.content as Array<{ text: string }>)[0].text) as {
+      rules?: Record<string, string>;
+    }).rules?.['browser-workflow'];
+    expect(rules).toContain('kind:"fill", fields:');
+    expect(rules).toContain('不在同一次调用里提交');
+    expect(rules).toContain('request_input_handoff');
+    await h.cleanup();
+  });
+
   it('dispatches browser calls through the injected runtime', async () => {
     const h = await makeHarness();
     const result = await h.client.callTool({

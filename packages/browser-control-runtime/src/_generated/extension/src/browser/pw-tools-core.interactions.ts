@@ -1426,6 +1426,35 @@ export async function fillFormViaPlaywright(opts: {
   const { abortPromise, cleanup } = createAbortPromise(opts.signal);
   const reconcileRemoteDialog = () => reconcileRemoteDialogAfterActionSettled(page, opts.signal);
   try {
+    // Passwords and one-time codes belong to the owner (request_input_handoff).
+    // Check every field first so this refusal never leaves a form half-filled.
+    for (const field of opts.fields) {
+      const secretRef = field.ref.trim();
+      if (!secretRef) {
+        continue;
+      }
+      const secret = await refLocator(page, secretRef).evaluate(
+        (el) => {
+          if (!(el instanceof HTMLInputElement)) {
+            return false;
+          }
+          const tokens = String(el.autocomplete || "").toLowerCase().split(/\s+/);
+          return (
+            el.type === "password" ||
+            tokens.includes("one-time-code") ||
+            tokens.includes("current-password") ||
+            tokens.includes("new-password")
+          );
+        },
+        undefined,
+        { timeout },
+      );
+      if (secret) {
+        throw new Error(
+          `field ${secretRef} is a password or verification-code field; do not type it — call request_input_handoff`,
+        );
+      }
+    }
     for (const field of opts.fields) {
       const ref = field.ref.trim();
       const type = (field.type || DEFAULT_FILL_FIELD_TYPE).trim() || DEFAULT_FILL_FIELD_TYPE;

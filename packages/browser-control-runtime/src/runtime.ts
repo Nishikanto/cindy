@@ -243,6 +243,52 @@ export interface CreateBrowserControlRuntimeOptions {
   logSink?: LogSink;
 }
 
+const ACT_TARGET_CONFLICT =
+  'act: request.targetId names a different tab than targetId; pass the tab only as the top-level targetId';
+
+/**
+ * planDispatch merges `request.targetId ?? targetId` into the single id the
+ * /act route sees, so a nested id naming another tab would silently win there.
+ * When the two names differ, resolve both against the live tab list (a label
+ * and a raw id may name the same tab) and continue only if they match.
+ */
+async function reconcileActTargets(
+  request: BrowserControlRequest,
+): Promise<{ ok: true; request: BrowserControlRequest } | { ok: false; result: BrowserControlResult }> {
+  const outer = request.targetId?.trim();
+  const inner = request.request?.targetId?.trim();
+  if (request.action !== 'act' || !request.request || !outer || !inner || outer === inner) {
+    return { ok: true, request };
+  }
+  const refused = {
+    ok: false as const,
+    result: {
+      ok: false,
+      action: request.action,
+      errorCode: 'BROWSER_RUNTIME_INVALID_REQUEST' as const,
+      message: ACT_TARGET_CONFLICT,
+    },
+  };
+  try {
+    const listed = await dispatchBrowserControlRequest({
+      method: 'GET',
+      path: '/tabs',
+      query: request.profile ? { profile: request.profile } : undefined,
+    });
+    if (listed.status >= 400) return refused;
+    const tabs = (listed.body as { tabs?: Array<{ targetId: string }> }).tabs ?? [];
+    const a = resolveTargetIdFromTabs(outer, tabs);
+    const b = resolveTargetIdFromTabs(inner, tabs);
+    if (!a.ok || !b.ok || a.targetId !== b.targetId) return refused;
+    return {
+      ok: true,
+      request: { ...request, targetId: a.targetId, request: { ...request.request, targetId: a.targetId } },
+    };
+  } catch {
+    return refused;
+  }
+}
+
 /** Create a runtime backed by the vendored in-process dispatcher. */
 export function createBrowserControlRuntime(
   options: CreateBrowserControlRuntimeOptions = {},
@@ -278,6 +324,9 @@ export function createBrowserControlRuntime(
           return { ok: false, action: request.action, message: error instanceof Error ? error.message : String(error) };
         }
       }
+      const reconciled = await reconcileActTargets(request);
+      if (!reconciled.ok) return reconciled.result;
+      request = reconciled.request;
       let plan: DispatchPlan;
       try {
         plan = planDispatch(request);

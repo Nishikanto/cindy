@@ -89,7 +89,6 @@ const READ_ONLY_MCP_TOOLS: ReadonlySet<string> = new Set([
 const TRUSTED_MCP_SERVERS: ReadonlySet<string> = new Set([
   'cindy_android',
   'cindy_browser',
-  'cindy_computer',
   // 飞书轮次里往当前对话发消息 / 文件、表情、置顶与 send_*_to_user: 与 bot 自己回复同一出口,
   // 目标由逐轮作用域钉死。call_api / recall_message 单独在下方按次审批。
   'cindy_feishu_bot',
@@ -277,6 +276,19 @@ export function getDesktopMcpToolApprovalPolicy(
       (!Array.isArray(args?.session_ids) || args.session_ids.some((id) =>
         typeof id !== 'string' || targetsAnotherComputer(sessionIdDevice(id))))) {
       return 'prompt-each-time';
+    }
+  }
+  // 脚本模式任务由宿主按时执行一条本机命令，且不经 agent 审阅。创建、改为脚本模式都会
+  // 留下新的持久执行入口，所以逐次交给会话权限档。省略外层工具名或参数读不出时 fail closed。
+  if (serverName === 'cindy_scheduler') {
+    const params = readJsonObject(toolParams);
+    const progressive = toolName === 'call_tool' || !toolName;
+    const action = progressive ? (typeof params?.name === 'string' ? params.name.trim() : '') : toolName;
+    const args = progressive ? readJsonObject(params?.args) : params;
+    const isScript = (value: Record<string, unknown> | undefined) =>
+      value?.executionMode === 'script' || value?.scriptConfig != null;
+    if (action === 'schedule_create' || action === 'schedule_update' || (!action && params)) {
+      if (!args || isScript(args) || isScript(params)) return 'prompt-each-time';
     }
   }
   // 改动另一台电脑上的定时任务（可改写并触发那台电脑上的命令）同样交给权限档：Full Access

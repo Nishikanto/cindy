@@ -512,6 +512,7 @@ describe('RsbWebviewAutomation act', () => {
       if (method === 'Runtime.evaluate') return { result: { objectId: 'field-object' } };
       if (method === 'Accessibility.enable') return {};
       if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+      if (method === 'Accessibility.getPartialAXTree') return { nodes: [AX_TREE.nodes[2]] };
       if (method === 'DOM.describeNode') return { node: { backendNodeId: 6 } };
       if (method === 'DOM.resolveNode') return { object: { objectId: 'field-object' } };
       if (method === 'Runtime.callFunctionOn') {
@@ -542,6 +543,92 @@ describe('RsbWebviewAutomation act', () => {
         ),
     );
     expect(fillCall).toBeDefined();
+  });
+
+  // 测试价值
+  // - 生产入口与可观察结果：RsbWebviewAutomation.act({ kind: 'fill', fields })；字段在快照后变成
+  //   别的控件、是密码／验证码框、或中途变化时，不写入（或只报告已写入的数量），不会写错框。
+  // - 规则依据：docs/product-rules/input-handoff.md §1（密码、验证码由主人填写）；多字段 fill
+  //   原先只确认节点仍存在，跳过 type 使用的可编辑检查，失败时不报告已写入字段数。
+  // - 现有覆盖缺口：上一个用例只覆盖单字段 happy path。
+  // - 最小失败输入：fields 含一个 role/name 与快照不同或 type=password 的 ref。
+  // - tier：unit（模拟 CDP 调用，不启动 webview）。
+  describe('multi-field fill safety checks', () => {
+    const fillCalls = (harness: DebuggerHarness) =>
+      harness.sendCommand.mock.calls.filter(
+        ([method, params]) =>
+          method === 'Runtime.callFunctionOn' &&
+          String((params as { functionDeclaration?: string })?.functionDeclaration).includes(
+            'HTMLInputElement.prototype',
+          ),
+      );
+
+    // e1 = button "Submit" (node 2), e2 = textbox "Email" (node 3) in AX_TREE.
+    function fillHarness(options: {
+      identity?: (backendNodeId: number, call: number) => { role: string; name: string };
+      secretNodes?: number[];
+    }) {
+      const identityCalls = new Map<number, number>();
+      return debuggerHarness(async (method, params) => {
+        if (method === 'Accessibility.enable') return {};
+        if (method === 'Accessibility.getFullAXTree') return AX_TREE;
+        if (method === 'Accessibility.getPartialAXTree') {
+          const id = params?.backendNodeId as number;
+          const call = (identityCalls.get(id) ?? 0) + 1;
+          identityCalls.set(id, call);
+          const original = AX_TREE.nodes.find((node) => node.backendDOMNodeId === id)!;
+          const current = options.identity?.(id, call)
+            ?? { role: original.role.value, name: original.name.value };
+          return { nodes: [{ backendDOMNodeId: id, role: { value: current.role }, name: { value: current.name } }] };
+        }
+        if (method === 'DOM.resolveNode') return { object: { objectId: `node-${String(params?.backendNodeId)}` } };
+        if (method === 'Runtime.callFunctionOn') {
+          if (String(params?.functionDeclaration).includes('cindy:fill-probe')) {
+            const id = Number(String(params?.objectId).replace('node-', ''));
+            return { result: { value: { secret: options.secretNodes?.includes(id) ?? false } } };
+          }
+          return { result: { value: { ok: true } } };
+        }
+        if (method === 'Runtime.releaseObject') return {};
+        throw new Error(`unexpected command: ${method}`);
+      });
+    }
+
+    async function snapshotThenFill(harness: DebuggerHarness, fields: Array<Record<string, unknown>>) {
+      const instance = automation();
+      await instance.snapshot('tab-1', harness.wc, { action: 'snapshot', interactive: true });
+      return instance.act('tab-1', harness.wc, { kind: 'fill', fields });
+    }
+
+    it('refuses to fill when a field no longer matches the snapshot', async () => {
+      const harness = fillHarness({ identity: () => ({ role: 'button', name: 'Delete account' }) });
+      await expect(snapshotThenFill(harness, [{ ref: 'e2', type: 'text', value: 'Ada' }]))
+        .rejects.toThrow('changed since the snapshot');
+      expect(fillCalls(harness)).toHaveLength(0);
+    });
+
+    it('refuses secret fields before typing anything', async () => {
+      const harness = fillHarness({ secretNodes: [2] });
+      await expect(snapshotThenFill(harness, [
+        { ref: 'e2', type: 'text', value: 'Ada' },
+        { ref: 'e1', type: 'text', value: 'hunter2' },
+      ])).rejects.toThrow('request_input_handoff');
+      expect(fillCalls(harness)).toHaveLength(0);
+    });
+
+    it('reports partial progress when a field changes mid-way', async () => {
+      // Node 2 matches during validation (call 1) but changes before it is filled (call 2).
+      const harness = fillHarness({
+        identity: (id, call) => (id === 2 && call >= 2
+          ? { role: 'button', name: 'Delete account' }
+          : id === 2 ? { role: 'button', name: 'Submit' } : { role: 'textbox', name: 'Email' }),
+      });
+      await expect(snapshotThenFill(harness, [
+        { ref: 'e2', type: 'text', value: 'Ada' },
+        { ref: 'e1', type: 'text', value: 'x' },
+      ])).rejects.toThrow('filled 1 of 2 fields before stopping');
+      expect(fillCalls(harness)).toHaveLength(1);
+    });
   });
 
   it('hovers without focusing the target', async () => {

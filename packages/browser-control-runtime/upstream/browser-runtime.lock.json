@@ -83,6 +83,10 @@
       "desc": "guard hover/drag/scrollIntoView/wait interactions with the same proxy navigation policy"
     },
     {
+      "file": "extension/src/browser/pw-tools-core.interactions.ts",
+      "desc": "refuse password and one-time-code fields in multi-field fill before typing anything"
+    },
+    {
       "file": "extension/src/browser/routes/agent.act.hooks.ts",
       "desc": "apply the effective browser proxy mode to file-chooser click navigation"
     },
@@ -124,7 +128,7 @@
     }
   ],
   "fileCount": 335,
-  "contentHash": "1e5b9ed7f2156b726934dd3f3fd1f2c306129d12dc25bdd1471b2e233e390d24",
+  "contentHash": "9b63e934f741c2bb23bc7ab75c5297f4e4640cca993623f8212101829155d71f",
   "fsSafe": {
     "package": "@openclaw/fs-safe",
     "version": "0.4.0"

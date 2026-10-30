@@ -211,6 +211,7 @@ pnpm --filter @cindy/browser-control-runtime test    # 契约 + SSRF guard
 - 新保存配方的交互/读取步骤须有完整 URL 和可选唯一可见 CSS 元素/文本 `guard`；末步 `expect` 检查数量、必需顶层字段与业务值。extract 将 guard 与读取合成同一次 evaluate；写动作前独立 guard，不能把它当事务或幂等保证。工具不重放步骤，后置失败须先核对写入是否已成功。
 - 本地每站 `recipes/<id 的 SHA-256>.json` 支持多个流程，原子替换复用 Desktop 工具；loader 兼容 `recipe.json`、新文件优先。旧配方保留执行兼容，实际失败后暂停；新建/修订必须经过新验证。失败不把候选覆盖到正式配方。跨任务并发修改同一配方仍是最后写入优先，不新增锁/版本管理系统。
 - `wait.fn` 补丁在 `sync.mjs`：host 只编译函数，页面执行；传真实 function 给 `waitForFunction`，避免函数源码被当 truthy、重复 eval 被 Trusted Types 拦截。timeout 放第三参数。异步 predicate 明确拒绝，避免 Promise 假成功；evaluate 仍支持 async。
+- 多字段 `fill` 补丁在 `sync.mjs`：先逐个检查目标，任一字段是密码／验证码框（`type=password` 或 `autocomplete` 含 `one-time-code` / `current-password` / `new-password`）就整体拒绝、一个都不写，提示改用 `request_input_handoff`；回归见 `src/__tests__/fill-secret-fields.test.ts`。
 - 验证入口：`recipe-runner.test.ts`、`browserMcpServer.test.ts`、Desktop browser-recipes tests、`interaction-proxy-policy.test.ts`；真实只读对照 `scripts/browser-live-recipe-compare.mjs` 的 `guarded` 模式与 `--maintenance-checks=true`。宿主运行版不会因源码修改自动更新。
 
 ### 经验缓存与按需学习（2026-10-27）
