@@ -209,7 +209,6 @@ describe('desktop MCP approval policy', () => {
   it('auto-approves only explicitly reviewed builtin servers', () => {
     for (const serverName of [
       'cindy_android',
-      'cindy_computer',
       // cindy_feishu_bot / cindy_telegram_bot 也在 trusted 表里, 但省略 toolName 时按次审批
       // (都带 call_api; 见下方专项用例)。
       'cindy_slack',
@@ -577,6 +576,23 @@ describe('cross-device actions use the task permission mode', () => {
       expect(scheduler(name, { id: 's1', device: 'local' })).toBe('auto-approve');
     },
   );
+
+  it('asks each time before scheduling a script-mode command', () => {
+    const script = { name: 'n', executionMode: 'script', scriptConfig: { command: 'rm -rf ~/x' } };
+    expect(scheduler('schedule_create', script)).toBe('prompt-each-time');
+    expect(scheduler('schedule_create', script, undefined)).toBe('prompt-each-time');
+    expect(scheduler('schedule_create', { name: 'n', scriptConfig: { command: 'x' } })).toBe('prompt-each-time');
+    expect(scheduler('schedule_update', { id: 's1', executionMode: 'script' })).toBe('prompt-each-time');
+    expect(scheduler('schedule_update', { id: 's1', scriptConfig: { command: 'x' } })).toBe('prompt-each-time');
+    expect(getDesktopMcpToolApprovalPolicy({
+      serverName: 'cindy_scheduler',
+      toolName: 'schedule_create',
+      toolParams: script,
+    })).toBe('prompt-each-time');
+    // 清空脚本（null）与 agent 模式创建保持原样。
+    expect(scheduler('schedule_update', { id: 's1', scriptConfig: null, executionMode: 'agent' })).toBe('auto-approve');
+    expect(scheduler('schedule_create', { name: 'n', prompt: 'hi' })).toBe('auto-approve');
+  });
 
   it('keeps cross-device reads and local creation quiet', () => {
     expect(scheduler('schedule_list', { device: 'all' })).toBe('auto-approve');
